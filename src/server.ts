@@ -1,11 +1,58 @@
 import express, { Request, Response } from 'express';
+import http from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 import pool from './db';
 import { startLockReaper } from './worker';
+import { connectRedis, redisPublisher, redisSubscriber } from './redis';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const SEAT_UPDATES_CHANNEL = 'seat_updates';
+
+interface SeatUpdateMessage {
+  seat_id: string;
+  status: 'LOCKED' | 'BOOKED';
+  user_id: string;
+}
+
+/**
+ * Publishes a seat status change to Redis. All server instances
+ * subscribed to SEAT_UPDATES_CHANNEL (including this one) will
+ * receive it and relay it to their connected WebSocket clients.
+ */
+async function publishSeatUpdate(message: SeatUpdateMessage): Promise<void> {
+  try {
+    await redisPublisher.publish(SEAT_UPDATES_CHANNEL, JSON.stringify(message));
+  } catch (err) {
+    console.error('[redis] Failed to publish seat update:', err);
+  }
+}
+
 app.use(express.json());
+
+/**
+ * We create a raw http.Server explicitly and pass the Express app as
+ * its request handler, rather than relying on the server app.listen()
+ * creates implicitly. This is required so the ws WebSocketServer can
+ * attach to the same underlying server and share one port for both
+ * HTTP and WebSocket traffic.
+ */
+const server = http.createServer(app);
+
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws: WebSocket) => {
+  console.log('[ws] New WebSocket client connected');
+
+  ws.on('close', () => {
+    console.log('[ws] WebSocket client disconnected');
+  });
+
+  ws.on('error', (err) => {
+    console.error('[ws] WebSocket client error:', err);
+  });
+});
 
 app.get('/health', async (_req: Request, res: Response) => {
   try {
@@ -89,6 +136,8 @@ app.post('/api/seats/:id/lock', async (req: Request, res: Response) => {
 
     await client.query('COMMIT');
 
+    await publishSeatUpdate({ seat_id: seat.id, status: 'LOCKED', user_id: locked_by });
+
     return res.status(200).json({
       status: 'ok',
       message: `Seat ${id} locked by ${locked_by}`,
@@ -151,6 +200,8 @@ app.post('/api/seats/:id/book', async (req: Request, res: Response) => {
 
     await client.query('COMMIT');
 
+    await publishSeatUpdate({ seat_id: seat.id, status: 'BOOKED', user_id });
+
     return res.status(200).json({
       status: 'ok',
       message: `Seat ${id} booked by ${user_id}`,
@@ -164,7 +215,41 @@ app.post('/api/seats/:id/book', async (req: Request, res: Response) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  startLockReaper();
-});
+async function startServer(): Promise<void> {
+  try {
+    await connectRedis();
+
+    await redisSubscriber.subscribe(SEAT_UPDATES_CHANNEL, (message: string) => {
+      let parsed: SeatUpdateMessage;
+
+      try {
+        parsed = JSON.parse(message);
+      } catch (err) {
+        console.error('[redis] Failed to parse seat update message:', err);
+        return;
+      }
+
+      const payload = JSON.stringify(parsed);
+
+      wss.clients.forEach((ws: WebSocket) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(payload);
+          } catch (err) {
+            console.error('[ws] Failed to send message to client:', err);
+          }
+        }
+      });
+    });
+  } catch (err) {
+    console.error('Failed to connect to Redis:', err);
+    process.exit(1);
+  }
+
+  server.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    startLockReaper();
+  });
+}
+
+startServer();
