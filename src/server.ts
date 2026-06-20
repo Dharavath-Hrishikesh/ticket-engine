@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import cors from 'cors';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import pool from './db';
@@ -6,6 +7,7 @@ import { startLockReaper } from './worker';
 import { connectRedis, redisPublisher, redisSubscriber } from './redis';
 
 const app = express();
+app.use(cors());
 const PORT = process.env.PORT || 3000;
 
 const SEAT_UPDATES_CHANNEL = 'seat_updates';
