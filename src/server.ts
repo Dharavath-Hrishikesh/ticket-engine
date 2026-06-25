@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 const SEAT_UPDATES_CHANNEL = 'seat_updates';
 
 interface SeatUpdateMessage {
-  seat_id: string;
+  id: string;
   status: 'LOCKED' | 'BOOKED';
   user_id: string;
 }
@@ -138,7 +138,7 @@ app.post('/api/seats/:id/lock', async (req: Request, res: Response) => {
 
     await client.query('COMMIT');
 
-    await publishSeatUpdate({ seat_id: seat.id, status: 'LOCKED', user_id: locked_by });
+    await publishSeatUpdate({ id: seat.id, status: 'LOCKED', user_id: locked_by });
 
     return res.status(200).json({
       status: 'ok',
@@ -202,7 +202,7 @@ app.post('/api/seats/:id/book', async (req: Request, res: Response) => {
 
     await client.query('COMMIT');
 
-    await publishSeatUpdate({ seat_id: seat.id, status: 'BOOKED', user_id });
+    await publishSeatUpdate({ id: seat.id, status: 'BOOKED', user_id });
 
     return res.status(200).json({
       status: 'ok',
